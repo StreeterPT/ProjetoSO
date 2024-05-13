@@ -31,17 +31,64 @@ sem_t *log_sem; // Semaphore for synchronizing access to the log file
 sem_t *engines_sem;
 
 pid_t auth_man_process;
+pid_t engine_monitor;
+int *engine_pids;
+int num_auth_engines;
+
+Auth_Engine_Manager* auth_engine_manager;
+SharedMemory* shared_mem;
+
+int shmid1, shmid2;
+
+
 
 void sigint_handler() {
-    printf("\nRecebido o sinal SIGINT. Terminando o programa...\n");
-    //remover_pipes();
+    printf("\nSIGINT RECEIVED. CLEANING RESOURCES....\n");
+    if (unlink(USER_PIPE) == -1) {
+        write_log("ERROR UNLINKING USER PIPE\n");
+        // Handle error if needed
+    } else {
+        write_log("USER PIPE UNLINKED.\n");
+    }
+    if (unlink(BACK_PIPE) == -1) {
+        write_log("ERROR UNLINKING BACK PIPE\n");
+        // Handle error if needed
+    } else {
+        write_log("BACK PIPE UNLINKED.\n");
+    }
 
-    //if (shmctl(mem_id, IPC_RMID, NULL) == -1) {
-       // perror("Erro ao liberar memória compartilhada");
-     //   exit(EXIT_FAILURE);
-    //}
+    if (shmdt(auth_engine_manager) == -1) {
+        perror("Error detaching shared memory 1");
+    }
+    if (shmdt(shared_mem) == -1) {
+        perror("Error detaching shared memory 2");
+    }
+    if (shmctl(shmid1, IPC_RMID, NULL) == -1) {
+        perror("Error removing shared memory 1");
+    }
+    if (shmctl(shmid2, IPC_RMID, NULL) == -1) {
+        perror("Error removing shared memory 2");
+    }
+    write_log("SHARED MEMORY DETACHED AND REMOVED SUCESSFULY!\n");
+
+    for(int i=0;i<num_auth_engines;i++){
+        kill(engine_pids[i],SIGTERM);
+    }
+    write_log("ENGINE PROCESSES DESTROYED!\n");
+
     kill(auth_man_process, SIGTERM);
+    write_log("AUTH REQ MANAGER PROCESS DESTROYED!\n");
     //kill(pid_monitor_engine, SIGTERM);
+
+    
+
+    // destroy semaphores
+    sem_destroy(&queue_sem);
+    sem_destroy(log_sem);
+    sem_destroy(engines_sem);
+
+    write_log("SEMAPHORES DESTROYED\n");
+    
     exit(EXIT_SUCCESS);
 }
 
@@ -293,7 +340,7 @@ void authorization_engine(int read_fd, int id, int sleeptime, SharedMemory* shar
             engine_manager->auth_engine_flags[engine_id] = 0; //mete o motor pronto a trabalhar
            // pthread_mutex_unlock(&engine_manager->mutex_flags);
             if(working_engines == engine_manager->num_engines){
-                sem_post(&engines_sem);
+                sem_post(engines_sem);
             }
             //pthread_mutex_unlock(engine_manager->mutex_flags);
             write_log("ENGINE PROCESSED REQUEST\n");
@@ -364,7 +411,8 @@ void* sender_f(void* arg) {
         }
 
         if (passou_o_tempo == 0){
-        sem_wait(&engines_sem);
+
+        sem_wait(engines_sem);
 
         
         //pthread_mutex_lock(&data->auth_engine_manager->mutex_flags);
@@ -391,7 +439,7 @@ void* sender_f(void* arg) {
                     write_log(msg);
                     send_request_to_authorization_engine(data->engine_pipes[i],request);
                     //pthread_mutex_unlock(&data->auth_engine_manager->mutex_flags);
-                    sem_post(&engines_sem);
+                    sem_post(engines_sem);
                     
                     break;
                     }
@@ -498,7 +546,6 @@ void* receiver_f(void* arg) {
 
 
 pid_t auth_requests_manager(Configuration config,SharedMemory* shared_mem,Auth_Engine_Manager* auth_engine_manager) {
-    pid_t auth_manager_process;
     pthread_t receiver, sender;
     int res1, res2;
     int max_size = config.queue_pos;
@@ -509,18 +556,19 @@ pid_t auth_requests_manager(Configuration config,SharedMemory* shared_mem,Auth_E
 
 
     
-    auth_manager_process = fork();
-    if (auth_manager_process == -1) {
+    auth_man_process = fork();
+    if (auth_man_process == -1) {
         erro("ERROR CREATING PROCESS AUTHORIZATION REQUESTS MANAGER.\n");
         exit(EXIT_FAILURE);
     }
-    if (auth_manager_process == 0) {
+    if (auth_man_process == 0) {
         // Child process code for Authorization Requests Manager
         write_log("PROCESS AUTHORIZATION REQUESTS MANAGER CREATED.\n");
         int pipes[num_auth_engines + 1][2];  // Array of pipes (two descriptors each)
         int* engine_pipe_fds_write = malloc(sizeof(int) * (num_auth_engines+1)); // Array to hold write descriptors
         int pids[num_auth_engines];
-        
+        engine_pids = (int *)malloc(num_auth_engines * sizeof(int));
+
          for (int i = 0; i < num_auth_engines+1; i++) {
             if (pipe(pipes[i]) == -1) {  // Create each pipe
                 perror("Error creating pipe");
@@ -534,16 +582,20 @@ pid_t auth_requests_manager(Configuration config,SharedMemory* shared_mem,Auth_E
     write_log("UNNAMED PIPES CREATED!!\n");
 
     for(int i = 0; i < num_auth_engines;i++){
-        pids[i] = fork();
+        pid_t pid = fork();
 
-        if (pids[i] < 0) {
+        if (pid < 0) {
             perror("Error during fork");
             exit(EXIT_FAILURE);
         }
 
-        if (pids[i] == 0) {  // Child process
+        if (pid == 0) {  // Child process
             close(pipes[i][1]);  // Close the write end in child
             authorization_engine(pipes[i][0], i, engine_sleep, shared_mem, auth_engine_manager);  // Run engine with the read end
+        }
+        else {  // Parent process
+            engine_pids[i] = pid;  // Store the process ID of the child process
+            close(pipes[i][0]);  // Close the read end in the parent
         }
     }
 
@@ -590,7 +642,7 @@ pid_t auth_requests_manager(Configuration config,SharedMemory* shared_mem,Auth_E
                 }
             else{write_log("USER_PIPE already exists!\n");}
         } else {
-            write_log("USER_PIPE created.\n");
+            write_log("USER_PIPE CREATED.\n");
         }   
 
         // Tentar criar BACK_PIPE
@@ -603,7 +655,7 @@ pid_t auth_requests_manager(Configuration config,SharedMemory* shared_mem,Auth_E
             }
         else {
 
-            write_log("BACK_PIPE created.\n");
+            write_log("BACK_PIPE CREATED.\n");
             }   
 
         // Create thread Receiver
@@ -640,7 +692,8 @@ pid_t auth_requests_manager(Configuration config,SharedMemory* shared_mem,Auth_E
 
     // Parent process continues here
     //waitpid(auth_manager_process, NULL, 0); // Wait for child process to finish
-}
+    return auth_man_process;
+    }
 
 
 Auth_Engine_Manager* create_auth_engine_shared_memory(int* shmid, key_t key, int num_engines) {
@@ -656,7 +709,7 @@ Auth_Engine_Manager* create_auth_engine_shared_memory(int* shmid, key_t key, int
         return NULL;
     }
 
-    shared_mem->mutex_flags = malloc(sizeof(pthread_mutex_t));
+    
     pthread_mutexattr_t attr;
     pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
     pthread_mutexattr_init(&attr);
@@ -726,13 +779,20 @@ SharedMemory *create_shared_memory(int *shmid, key_t key, int num_users) {
 }
 
 int main(int argc, char *argv[]){
+
+    if (argc != 2) {
+        printf("Usage: %s <filename>\n", argv[0]);
+        return 1; // Exit with an error if filename is missing
+    }
+
+    char *configfile= argv[1];
+    
     //limpa o ficheiro log 
     clear_file("log.txt");
     
     //Abre o semaforo 
     log_sem = sem_open("/log_semaphore", O_CREAT | O_EXCL, 0644, 1);
     
-    signal(SIGINT, sigint_handler);
     
 
     if (log_sem == SEM_FAILED) {
@@ -759,18 +819,18 @@ int main(int argc, char *argv[]){
     write_log("5G_AUTH_PLATFORM SIMULATOR STARTING...\n");
 
 
-    write_log("Process System_Manager Created\n");
+    write_log("PROCESS SYSTEM MANAGER CREATED\n");
 
 
 
-    Configuration config=read_config("config.txt");
+    Configuration config=read_config(configfile);
 
     write_log("CONFIGURATION READ SUCCESSFULY\n");
 
     
 
     
-    write_log("Creating shared memory... \n");
+    write_log("CREATING SHARED MEMORY... \n");
 
     key_t key1 = 1234; // Key for the first shared memory segment
     key_t key2 = 5678; // Key for the second shared memory segment
@@ -778,9 +838,6 @@ int main(int argc, char *argv[]){
 
     // Create shared memory
 	
-    int shmid1, shmid2;
-
-
 
     int num_users = config.mobile_users;
     int num_auth_engines = config.auth_servers;
@@ -803,27 +860,26 @@ int main(int argc, char *argv[]){
     }
     
 
-    Auth_Engine_Manager* auth_engine_manager = create_auth_engine_shared_memory(&shmid1, key1, num_auth_engines); // 5 engine flags
+    auth_engine_manager = create_auth_engine_shared_memory(&shmid1, key1, num_auth_engines); // 5 engine flags
 
-    SharedMemory* shared_mem = create_shared_memory(&shmid2, key2,num_users); // Basic shared memory
+    shared_mem = create_shared_memory(&shmid2, key2,num_users); // Basic shared memory
 
     if (auth_engine_manager == NULL || shared_mem == NULL) {
         fprintf(stderr, "Error initializing shared memory segments.\n");
         return EXIT_FAILURE;
     }
-    
-    
-     auth_man_process = auth_requests_manager(config,shared_mem,auth_engine_manager);
+   
+    auth_man_process = auth_requests_manager(config,shared_mem,auth_engine_manager);
 
 
-    
-
+    signal(SIGINT, sigint_handler);
     
     waitpid(auth_man_process, NULL, 0); // Wait for child process to finish
+
     
 
     write_log("5G_AUTH_PLATFORM SIMULATOR CLOSING...\n");
-
+/*
     if (sem_unlink("/log_semaphore") == -1) {
         perror("Error unlinking semaphore");
         exit(EXIT_FAILURE);
@@ -846,6 +902,6 @@ int main(int argc, char *argv[]){
      // Clean up semaphore
     
     sem_destroy(&queue_sem);
-    
+    */
     return 0;
 }

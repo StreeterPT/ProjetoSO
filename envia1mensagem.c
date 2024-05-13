@@ -41,48 +41,12 @@ int main() {
         perror("Error creating BACK_PIPE");
         exit(EXIT_FAILURE);
     }
-
-    pid_t pid = fork();  // Create a child process
-    if (pid == -1) {
-        perror("Error during fork");
-        exit(EXIT_FAILURE);
-    }
-
-    if (pid == 0) {  // Child process
-        const char *child_messages_user[] = {
-            "12#VIDEO#100\n",
-            "10#20\n",
-            "12#VIDEO#100\n",
-            "12#VIDEO#100\n"
-        };
-
-        const char *child_messages_back[] = {
-            "1#reset\n",
-            "1#data_stats\n",
-            "12#VIDEO#100\n",
-            "12#VIDEO#100\n"
-        };
-
+            
         // Send messages to USER_PIPE
-        for (int i = 0; i < 4; i++) {
-            write_to_pipe(USER_PIPE, child_messages_user[i]);
-            sleep(1);  // Delay for demonstration purposes
-        }
-
-        // Send messages to BACK_PIPE
-        for (int i = 0; i < 4; i++) {
-            write_to_pipe(BACK_PIPE, child_messages_back[i]);
-            sleep(1);  // Delay for demonstration purposes
-        }
-
-        exit(0);  // Child exits after sending messages
-    } else {  
-
-        // Wait for the child process to complete
-        wait(NULL);
-
-        printf("Parent process finished.\n");
-    }
+   
+        write_to_pipe(USER_PIPE, "1#data_stats\n");
+        sleep(1);  // Delay for demonstration purposes
+       
 
     return 0;  // Success
 }

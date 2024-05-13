@@ -38,9 +38,37 @@ typedef struct{
 } UserData;
 
 typedef struct{
-    char* UserID;
-    char* Tipo;
+
+    int totaldata;
+    int totalreq;
+
+} Service_stats;
+
+
+
+typedef struct{
+
+    pthread_mutex_t mutex_user_info;  // Mutex para sincronização
+    Service_stats stats[3];
+    int num_users;
+    UserData Users[];
+    
+} SharedMemory;
+
+typedef struct{
+    pthread_mutex_t mutex_flags; 
+    int extra_auth_engine_flag;
+    int num_engines;
+    int auth_engine_flags[];
+    
+
+} Auth_Engine_Manager;
+
+typedef struct{
+    int UserID;
+    int Tipo;
     int QuantDados;
+    clock_t StartTime;
 } Pedido_User;
 
 // Definition of Queue
@@ -51,7 +79,12 @@ typedef struct {
     int rear;  // Rear index
     int count;  // Number of items in the queue
     int max_size;  // Maximum capacity
+    pthread_mutex_t mutex; // Mutex for synchronization
 } Queue;
+
+
+
+
 
 int init_queue(Queue *queue, int size);
 int is_full(const Queue *queue);
@@ -59,8 +92,14 @@ int is_empty(const Queue *queue);
 int is_below_or_equal_50(const Queue *queue);  // New function to check 50% capacity
 int enqueue(Queue *queue, Pedido_User pedido);
 Pedido_User dequeue(Queue *queue);
-Pedido_User create_pedido_user(const char *user_id, const char *tipo, int quant_dados);
+Pedido_User create_pedido_user(int user_id, int tipo, int quant_dados);
 void free_pedido_user(Pedido_User *pedido);
-
+void reset_stats(SharedMemory* shared_mem);
+void register_user(int user_id, int initial_plafond, SharedMemory* shared_mem);
+void consume_service(int user_id,int serviceid,int data, SharedMemory* shared_mem);
+void show_data_stats(SharedMemory* shared_mem);
+void create_engines(Auth_Engine_Manager* auth_engine_manager,int num_engines,int engine_sleep, SharedMemory* num_auth_engines, int (*pipes)[2]);
+void process_request(Pedido_User request, SharedMemory* shared_mem, Auth_Engine_Manager* auth_engine_manager,int engine_id);
+void write_log(char *s);
 
 #endif // DADOS_H
