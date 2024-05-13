@@ -10,18 +10,54 @@
 
 #define BUFFER_SIZE 124 
 
+
+
+typedef struct {
+    Queue *video_streaming_queue;
+    Queue *other_services_queue;
+    int* engine_pipes; // Array of pipe descriptors for authorization engines         // Matriz de pipes para comunicação com engines
+    int num_engines;        // Número total de engines
+    Auth_Engine_Manager* auth_engine_manager;
+    int max_video_wait;
+    int max_others_wait;
+    
+} ThreadsData;
+
+// Semaphore for synchronizing access to the queues
+sem_t queue_sem;
+
 sem_t *log_sem; // Semaphore for synchronizing access to the log file
 
-int count_char(const char *str, char ch) {
-    int count = 0;
-    while (*str) {
-        if (*str == ch) {
-            count++;
-        }
-        str++;
-    }
-    return count;
+sem_t *engines_sem;
+
+pid_t auth_man_process;
+
+void sigint_handler() {
+    printf("\nRecebido o sinal SIGINT. Terminando o programa...\n");
+    //remover_pipes();
+
+    //if (shmctl(mem_id, IPC_RMID, NULL) == -1) {
+       // perror("Erro ao liberar memória compartilhada");
+     //   exit(EXIT_FAILURE);
+    //}
+    kill(auth_man_process, SIGTERM);
+    //kill(pid_monitor_engine, SIGTERM);
+    exit(EXIT_SUCCESS);
 }
+
+int count_hashes(const char *input) {
+    int count = 0;  // Initialize count to zero
+    size_t length = strlen(input);  // Get the length of the input string
+
+    for (size_t i = 0; i < length; i++) {  // Loop through the string
+        if (input[i] == '#') {  // If the character is a '#'
+            count++;  // Increment the count
+        }
+    }
+
+    return count;  // Return the total count of '#'
+}
+
 
 void clear_file(const char *filename) {
     FILE *file = fopen(filename, "w"); // Open file in write mode
@@ -115,21 +151,160 @@ Configuration read_config(const char* filename) {
     return config;
 }
 
+// Function to send requests to an available Authorization Engine
+void send_request_to_authorization_engine(int write_fd, Pedido_User request) {
+    ssize_t bytes_written = write(write_fd, &request, sizeof(request));
+    if (bytes_written == -1) {
+        perror("Error writing to unnamed pipe");
+    }
+    
+}
 
 // Process commands based on their source
-void process_user_command(const char *command) {
-    printf("Processing user command: %s\n", command);
-    if (count_char('#',command) == 1){
+void process_user_command(const char *message,ThreadsData *data) {
+    int id;
+    int tipo;
+    int quantDados;
+    
+    
+    
+    ;
+    if (count_hashes(message) == 1){
+        char *data = strtok(message, "#");
+        if (data != NULL) {
+            id=atoi(data);  // Copy the first part to `id`
+            }
+        data = strtok(NULL, "#");  // Get the next token
+        if (data != NULL) {
+            if(id!=1){
+                quantDados=atoi(data);
+                tipo=0;
+                }
+            else{
+                    if (strcmp(data, "reset") == 0){
+                        tipo=0;
+                        quantDados=-1;
+                    }
+                    if(strcmp(data, "data_stats") == 0){
+                        tipo=1;
+                        quantDados=-1;}
+                }
+            }   
+        }
+    else{
+        char *data = strtok(message, "#");
+        if (data != NULL) {
+            id=atoi(data);  // Copy the first part to `id`
+            }
 
+        data = strtok(NULL, "#");  // Get the next token
+        if (data != NULL) {
+            if (strcmp(data, "VIDEO") == 0){
+                    tipo=1;
+                    }
+            if(strcmp(data, "MUSIC") == 0){
+                    tipo=2;
+                    }
+            if(strcmp(data, "SOCIAL") == 0){
+                    tipo=3;
+                    }
+            }
+
+        data = strtok(NULL, "#");  // Get the next token
+        if (data != NULL) {
+            quantDados=atoi(data);
+        }
+    
+    }
+    char msg[BUFFER_SIZE];
+    sprintf(msg,"PEDIDO DO MOBILE USER ID = %d Tipo=%d Quantidade de Dados=%d\n ",id,tipo,quantDados);
+    write_log(msg);
+    //printf("MENSAGEM PROCESSADA ...\n ID = %d\nTipo=%d\nQuantidade de Dados=%d\n",id,tipo,quantDados);
+    Pedido_User pedido = create_pedido_user(id,tipo,quantDados);
+    if(pedido.UserID !=1 && pedido.Tipo==1){
+        if(!is_full(data->video_streaming_queue)){
+            enqueue(data->video_streaming_queue,pedido);
+            sem_post(&queue_sem);
+            }
+        }
+    else{
+        if(!is_full(data->other_services_queue)){
+            enqueue(data->other_services_queue,pedido);
+            sem_post(&queue_sem);
+            }
+        }
+
+}
+
+void authorization_engine(int read_fd, int id, int sleeptime, SharedMemory* shared_mem, Auth_Engine_Manager* engine_manager) {
+    int engine_id = id;
+    fd_set read_set;
+    Pedido_User request;
+    char msg[BUFFER_SIZE];
+    sprintf(msg,"AUTH ENGINE %d CREATED\n",engine_id);
+    write_log(msg);
+    //pthread_mutex_lock(&engine_manager->mutex_flags);
+    engine_manager->auth_engine_flags[engine_id] = 0;
+    //pthread_mutex_unlock(&engine_manager->mutex_flags);
+
+    while (1) {
+        FD_ZERO(&read_set);
+        FD_SET(read_fd, &read_set);
+        
+        // Use select to wait for data to be available on the pipe
+        int ready = select(read_fd + 1, &read_set, NULL, NULL, NULL);
+        
+        if (ready == -1) {
+            perror("Error in select");
+            continue; // Continue to the next iteration of the loop
+        }
+
+        if (FD_ISSET(read_fd, &read_set)) {
+            ssize_t bytes_read = read(read_fd, &request, sizeof(request));
+            if (bytes_read < 0) {
+                perror("Error reading from pipe");
+                continue; // Continue to the next iteration of the loop
+            } else if (bytes_read == 0) {
+                // No data read, handle accordingly
+                continue; // Continue to the next iteration of the loop
+            }
+
+            // Process the request
+            //pthread_mutex_lock(&engine_manager->mutex_flags);
+            //engine_manager->auth_engine_flags[engine_id] = 1; // Mark the engine as busy
+            //pthread_mutex_unlock(&engine_manager->mutex_flags);
+            
+            write_log("ENGINE PROCESSING REQUEST...");
+
+            engine_manager->auth_engine_flags[engine_id]=1;
+
+            process_request(request,shared_mem,engine_manager,engine_id); // Process the request
+
+            usleep(sleeptime);
+
+            
+            int working_engines=0;
+            for(int i = 0;i < engine_manager->num_engines+1;i++){
+                if(engine_manager->auth_engine_flags[i]==1){
+                    working_engines++;
+                    }
+                }
+           // pthread_mutex_lock(&engine_manager->mutex_flags);
+            engine_manager->auth_engine_flags[engine_id] = 0; //mete o motor pronto a trabalhar
+           // pthread_mutex_unlock(&engine_manager->mutex_flags);
+            if(working_engines == engine_manager->num_engines){
+                sem_post(&engines_sem);
+            }
+            //pthread_mutex_unlock(engine_manager->mutex_flags);
+            write_log("ENGINE PROCESSED REQUEST\n");
+        }
     }
 
-    // Additional logic for user commands
+    // Close the pipe when done (if needed)
+    close(read_fd);
+    write_log("AUTHORIZATION ENGINE EXITING...\n");
 }
-
-void process_backoffice_command(const char *command) {
-    printf("Processing backoffice command: %s\n", command);
-    // Additional logic for backoffice commands
-}
+    
 
 void monitor_engine() {
     pid_t monitor_process;
@@ -153,12 +328,92 @@ void monitor_engine() {
 void* sender_f(void* arg) {
     // Implement thread 1 logic here
     write_log("THREAD SENDER CREATED!\n");
+    ThreadsData *data= (ThreadsData *)arg;
+    
+      while (1) {
+        
+        // Wait until there's a request in either queue
+        sem_wait(&queue_sem);
+
+        Pedido_User request;
+
+        // Prioritize video streaming requests
+        if (!is_empty(data->video_streaming_queue)) {
+            request = dequeue(data->video_streaming_queue);
+        } else {
+            request = dequeue(data->other_services_queue);
+        }
+        
+        write_log("SENDER: RETRIEVED REQUEST FROM QUEUE\n");
+        
+        clock_t cur_time = clock();
+
+        double elapsed_time = (double)(cur_time - request.StartTime) * 1000.0 / CLOCKS_PER_SEC;
+
+        int passou_o_tempo=0;
+
+        if (request.UserID != 1 && request.Tipo == 1){
+            if(elapsed_time > data->max_video_wait){
+                write_log("PEDIDO DE AUTORIZAÇAO EXCEDEU O TEMPO\n");
+                passou_o_tempo+=1;}
+            }
+        else{
+            if(elapsed_time > data->max_others_wait){
+                write_log("PEDIDO DE AUTORIZAÇAO EXCEDEU O TEMPO\n");
+                passou_o_tempo+=1;}
+        }
+
+        if (passou_o_tempo == 0){
+        sem_wait(&engines_sem);
+
+        
+        //pthread_mutex_lock(&data->auth_engine_manager->mutex_flags);
+        int working_engines=0;
+        
+        for(int i = 0 ; i < data->num_engines+1; i++){
+            if(data->auth_engine_manager->auth_engine_flags[i] == 1){
+                working_engines++;
+                    }
+                }
+            
+        for(int i = 0 ; i < data->num_engines+1; i++){
+            if(data->auth_engine_manager->auth_engine_flags[i] == 0){
+
+                if(working_engines == data->num_engines-1){
+                    printf("/nENVIADO REQUEST PARA ULTIMO ENGINE %d/n",i);
+                    send_request_to_authorization_engine(data->engine_pipes[i],request);
+                    //pthread_mutex_unlock(&data->auth_engine_manager->mutex_flags);
+                    break;
+                    }
+                else{
+                    char msg[BUFFER_SIZE];
+                    sprintf(msg,"SENDER: TIPO %d ENVIADO REQUEST (ID = %d) PARA ENGINE %d\n",request.Tipo,request.UserID,i);
+                    write_log(msg);
+                    send_request_to_authorization_engine(data->engine_pipes[i],request);
+                    //pthread_mutex_unlock(&data->auth_engine_manager->mutex_flags);
+                    sem_post(&engines_sem);
+                    
+                    break;
+                    }
+                }
+            }}
+        
+        
+      }
     return NULL;
-}
+    }
+
+
+   
+
+
 
 void* receiver_f(void* arg) {
     // Implement thread 1receiver logic here
     write_log("THREAD RECEIVER CREATED!\n");
+
+    ThreadsData *data= (ThreadsData *)arg;
+
 
     int user_pipe_fd = open(USER_PIPE, O_RDONLY | O_NONBLOCK); // Open in non-blocking mode
     int back_pipe_fd = open(BACK_PIPE, O_RDONLY | O_NONBLOCK);
@@ -199,9 +454,8 @@ void* receiver_f(void* arg) {
                 char *newline;
                 while ((newline = strchr(message_start, '\n')) != NULL) {
                     *newline = '\0';  // Terminate the message
-                    printf("Received from USER_PIPE: %s\n", message_start);  // Handle the message
-                    int count=count_char(message_start,"#");
-                    printf("\nnumero de #:%d \n",count);
+                    write_log("RECEIVER RECEIVED REQUEST FROM USER_PIPE \n");  // Handle the message
+                    process_user_command(message_start,data);
                     message_start = newline + 1;  // Move to the next message
                 }
 
@@ -223,7 +477,8 @@ void* receiver_f(void* arg) {
                 char *newline;
                 while ((newline = strchr(message_start, '\n')) != NULL) {
                     *newline = '\0';  // Terminate the message
-                    printf("Received from BACK_PIPE: %s\n", message_start);  // Handle the message
+                    write_log("RECEIVER RECEIVED REQUEST FROM BACK_PIPE \n");  // Handle the message
+                    process_user_command(message_start,data);
                     message_start = newline + 1;  // Move to the next message
                 }
 
@@ -241,35 +496,19 @@ void* receiver_f(void* arg) {
     return NULL;
 }
 
-// Function to create and attach to shared memory
-UserData *create_sm(int *shmid, int num_users) {
-    // Create a shared memory segment
-    *shmid = shmget(IPC_PRIVATE, sizeof(UserData) * num_users, IPC_CREAT | 0777);
-    if (*shmid == -1) {
-        perror("shmget failed");
-        return NULL;
-    }
 
-    printf("Shared memory segment created with ID: %d\n", *shmid);
-
-    // Attach the shared memory segment to the process's address space
-    UserData *shared_data = (UserData *)shmat(*shmid, NULL, 0);
-    if (shared_data == (void *)-1) {
-        perror("shmat failed");
-        return NULL;
-    }
-
-    printf("Shared memory segment attached at address: %p\n", (void *)shared_data);
-
-    return shared_data;
-}
-
-
-void auth_requests_manager(Configuration config) {
+pid_t auth_requests_manager(Configuration config,SharedMemory* shared_mem,Auth_Engine_Manager* auth_engine_manager) {
     pid_t auth_manager_process;
     pthread_t receiver, sender;
     int res1, res2;
     int max_size = config.queue_pos;
+    int num_auth_engines=config.auth_servers;
+    int video_time = config.max_video_wait;
+    int others_time = config.max_others_wait;
+    int engine_sleep = config.auth_proc_time;
+
+
+    
     auth_manager_process = fork();
     if (auth_manager_process == -1) {
         erro("ERROR CREATING PROCESS AUTHORIZATION REQUESTS MANAGER.\n");
@@ -278,11 +517,45 @@ void auth_requests_manager(Configuration config) {
     if (auth_manager_process == 0) {
         // Child process code for Authorization Requests Manager
         write_log("PROCESS AUTHORIZATION REQUESTS MANAGER CREATED.\n");
+        int pipes[num_auth_engines + 1][2];  // Array of pipes (two descriptors each)
+        int* engine_pipe_fds_write = malloc(sizeof(int) * (num_auth_engines+1)); // Array to hold write descriptors
+        int pids[num_auth_engines];
+        
+         for (int i = 0; i < num_auth_engines+1; i++) {
+            if (pipe(pipes[i]) == -1) {  // Create each pipe
+                perror("Error creating pipe");
+                exit(EXIT_FAILURE);  // Exit if creation fails
+            }
+            // After creating pipes, store the write ends for further use
+        
+            engine_pipe_fds_write[i] = pipes[i][1]; // Store write ends
+        }
+    
+    write_log("UNNAMED PIPES CREATED!!\n");
+
+    for(int i = 0; i < num_auth_engines;i++){
+        pids[i] = fork();
+
+        if (pids[i] < 0) {
+            perror("Error during fork");
+            exit(EXIT_FAILURE);
+        }
+
+        if (pids[i] == 0) {  // Child process
+            close(pipes[i][1]);  // Close the write end in child
+            authorization_engine(pipes[i][0], i, engine_sleep, shared_mem, auth_engine_manager);  // Run engine with the read end
+        }
+    }
+
+
+
+
 
         Queue video_streaming_queue;
         Queue other_services_queue;
 
         
+
 
         // Initialize the queues
         if (init_queue(&video_streaming_queue, max_size) != 0) {
@@ -294,6 +567,17 @@ void auth_requests_manager(Configuration config) {
         fprintf(stderr, "Failed to initialize other services queue.\n");
         return -1;
         }
+
+        ThreadsData queues = {
+            .video_streaming_queue = &video_streaming_queue,
+            .other_services_queue = &other_services_queue,
+            .engine_pipes = engine_pipe_fds_write,
+            .num_engines = num_auth_engines,
+            .auth_engine_manager = auth_engine_manager, // Assign Auth_Engine_Manager pointer
+            .max_video_wait = video_time,
+            .max_others_wait = others_time,
+        };
+
 
         write_log("QUEUE VIDEO STREAMING CREATED!\n");
         write_log("QUEUE OTHER SERVICES CREATED!\n");
@@ -318,24 +602,33 @@ void auth_requests_manager(Configuration config) {
             else{write_log("BACK_PIPE ALREADY EXISTS!!\n");}
             }
         else {
+
             write_log("BACK_PIPE created.\n");
             }   
 
         // Create thread Receiver
-        res1 = pthread_create(&receiver, NULL, receiver_f, NULL);
+        
+
+        
+
+        
+        res1 = pthread_create(&receiver, NULL, receiver_f, &queues);
         if (res1 != 0) {
             erro("Error creating thread receiver");
             exit(EXIT_FAILURE);
         }
 
         // Create thread Sender
-        res2 = pthread_create(&sender, NULL, sender_f, NULL);
+        res2 = pthread_create(&sender, NULL, sender_f, &queues);
         if (res2 != 0) {
             erro("Error creating thread sender");
             exit(EXIT_FAILURE);
         }
 
         
+        for (int i = 0; i < num_auth_engines; i++) {
+        int status;
+        waitpid(pids[i], &status, 0);}
 
         // Wait for threads to finish before exiting
         pthread_join(receiver, NULL);
@@ -346,11 +639,91 @@ void auth_requests_manager(Configuration config) {
     }
 
     // Parent process continues here
-    waitpid(auth_manager_process, NULL, 0); // Wait for child process to finish
+    //waitpid(auth_manager_process, NULL, 0); // Wait for child process to finish
 }
 
 
+Auth_Engine_Manager* create_auth_engine_shared_memory(int* shmid, key_t key, int num_engines) {
+    size_t shm_size = sizeof(Auth_Engine_Manager) + sizeof(int) * num_engines+1;
+    *shmid = shmget(key, shm_size, IPC_CREAT | 0666);
+    if (*shmid == -1) {
+        perror("Error creating shared memory");
+        return NULL;
+    }
+    Auth_Engine_Manager* shared_mem = (Auth_Engine_Manager*)shmat(*shmid, NULL, 0);
+    if (shared_mem == (void*)-1) {
+        perror("Error attaching to shared memory");
+        return NULL;
+    }
 
+    shared_mem->mutex_flags = malloc(sizeof(pthread_mutex_t));
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+    pthread_mutexattr_init(&attr);
+
+    if (pthread_mutex_init(&shared_mem->mutex_flags, &attr) != 0) {
+        perror("Error initializing mutex");
+        return NULL;
+    }
+
+    pthread_mutexattr_destroy(&attr);  // Destroy the mutex attribute
+    // Initialize shared memory
+    // FLAGS  -1-INDISPONIVEL  0-DISPONIVEL 1-OCUPADO
+ 
+    for (int i = 0; i < num_engines+1; i++) {
+        shared_mem->auth_engine_flags[i] = -1;
+    }
+    shared_mem->num_engines=num_engines;
+
+    return shared_mem;
+}
+
+
+SharedMemory *create_shared_memory(int *shmid, key_t key, int num_users) {
+    // Calculate the size of the shared memory segment dynamically
+    size_t shm_size = sizeof(SharedMemory) + sizeof(UserData) * num_users;
+
+    // Create the shared memory segment with the given key
+    *shmid = shmget(key, shm_size, IPC_CREAT | 0666);
+    if (*shmid == -1) {
+        perror("Error creating shared memory");
+        return NULL;  // Return NULL on failure
+    }
+
+    // Attach to the shared memory segment
+    SharedMemory *shared_mem = (SharedMemory *)shmat(*shmid, NULL, 0);
+    if (shared_mem == (void *)-1) {
+        perror("Error attaching to shared memory");
+        return NULL;  // Return NULL on failure
+    }
+    
+    // Initialize the shared memory
+    shared_mem->num_users = num_users;  // Set the number of users
+    for (int i = 0; i < num_users; i++) {
+        shared_mem->Users[i].UserID = -1;  // Initialize user data
+        shared_mem->Users[i].PlafondInicial = -1;
+        shared_mem->Users[i].SaldoAtualizado = -1;
+    }
+
+    for (int i = 0; i < 3; i++) {
+        shared_mem->stats[i].totaldata = 0;  // Initialize statistics
+        shared_mem->stats[i].totalreq = 0;
+    }
+
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+
+    if (pthread_mutex_init(&shared_mem->mutex_user_info, &attr) != 0) {
+        perror("Error initializing mutex");
+        return NULL;
+    }
+
+    pthread_mutexattr_destroy(&attr);  // Destroy the mutex attribute
+    // Initialize shared memory
+
+    return shared_mem;  // Return the shared memory pointer
+}
 
 int main(int argc, char *argv[]){
     //limpa o ficheiro log 
@@ -358,6 +731,9 @@ int main(int argc, char *argv[]){
     
     //Abre o semaforo 
     log_sem = sem_open("/log_semaphore", O_CREAT | O_EXCL, 0644, 1);
+    
+    signal(SIGINT, sigint_handler);
+    
 
     if (log_sem == SEM_FAILED) {
         if (errno == EEXIST) {
@@ -373,6 +749,12 @@ int main(int argc, char *argv[]){
             exit(EXIT_FAILURE);
         }
     }
+
+    
+
+     // Initialize the semaphore with 0 (initially, there are no requests)
+    sem_init(&queue_sem, 0, 0);
+
 
     write_log("5G_AUTH_PLATFORM SIMULATOR STARTING...\n");
 
@@ -390,31 +772,54 @@ int main(int argc, char *argv[]){
     
     write_log("Creating shared memory... \n");
 
+    key_t key1 = 1234; // Key for the first shared memory segment
+    key_t key2 = 5678; // Key for the second shared memory segment
+
 
     // Create shared memory
 	
-    int shmid;
-    UserData *Users;
-    int num_users = config.mobile_users  ; // Example number of users
+    int shmid1, shmid2;
 
+
+
+    int num_users = config.mobile_users;
+    int num_auth_engines = config.auth_servers;
+
+    engines_sem = sem_open("/engines_semaphore", O_CREAT | O_EXCL, 0644, 1);
+
+    if (engines_sem == SEM_FAILED) {
+        if (errno == EEXIST) {
+            // If the semaphore already exists, open it without creating
+            engines_sem = sem_open("/engines_semaphore", 0);
+            if (log_sem == SEM_FAILED) {
+                perror("Error opening engines semaphore\n");
+                exit(EXIT_FAILURE);
+            }
+        } else {
+            // If the error is different from "File exists", report it
+            perror("Error creating/opening engines semaphore\n");
+            exit(EXIT_FAILURE);
+        }
+    }
     
-    // Create and attach to shared memory
-    Users = create_sm(&shmid, num_users);
 
-    if (Users == NULL) {
-        fprintf(stderr, "Failed to create and attach shared memory.\n");
+    Auth_Engine_Manager* auth_engine_manager = create_auth_engine_shared_memory(&shmid1, key1, num_auth_engines); // 5 engine flags
+
+    SharedMemory* shared_mem = create_shared_memory(&shmid2, key2,num_users); // Basic shared memory
+
+    if (auth_engine_manager == NULL || shared_mem == NULL) {
+        fprintf(stderr, "Error initializing shared memory segments.\n");
         return EXIT_FAILURE;
     }
+    
+    
+     auth_man_process = auth_requests_manager(config,shared_mem,auth_engine_manager);
 
-    // Initialize the shared memory data
-    for (int i = 0; i < num_users; i++) {
-        Users[i].UserID =-1;
-        Users[i].PlafondInicial = -1; // Example value
-        Users[i].SaldoAtualizado= -1;
-    }
-    monitor_engine();
 
-    auth_requests_manager(config);
+    
+
+    
+    waitpid(auth_man_process, NULL, 0); // Wait for child process to finish
     
 
     write_log("5G_AUTH_PLATFORM SIMULATOR CLOSING...\n");
@@ -424,13 +829,23 @@ int main(int argc, char *argv[]){
         exit(EXIT_FAILURE);
     }
     
-    // Detach the shared memory segment when done
-    if (shmdt(Users) == -1) {
-        perror("shmdt failed");
-        return EXIT_FAILURE;
+    if (shmdt(auth_engine_manager) == -1) {
+        perror("Error detaching shared memory 1");
+    }
+    if (shmdt(shared_mem) == -1) {
+        perror("Error detaching shared memory 2");
+    }
+    if (shmctl(shmid1, IPC_RMID, NULL) == -1) {
+        perror("Error removing shared memory 1");
+    }
+    if (shmctl(shmid2, IPC_RMID, NULL) == -1) {
+        perror("Error removing shared memory 2");
     }
 
     printf("Shared memory segment detached.\n");
+     // Clean up semaphore
+    
+    sem_destroy(&queue_sem);
     
     return 0;
 }
